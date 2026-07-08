@@ -44,7 +44,7 @@ class AuthController extends Controller
             Log::error('No se pudo enviar el correo de verificación.', ['error' => $e->getMessage()]);
         }
 
-        // No se emite token: la cuenta requiere activación (verificar correo) antes de poder iniciar sesión.
+        // No se emite token: la cuenta requiere activación (verificar correo) antes de poder iniciar sesión. 
         return response()->json([
             'message' => 'Cuenta creada correctamente. Revisa tu correo para activarla antes de iniciar sesión.',
         ], 201);
