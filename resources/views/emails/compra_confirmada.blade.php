@@ -8,7 +8,7 @@
         @foreach ($compras as $compra)
             <tr>
                 <td style="padding:12px 16px; border-bottom:1px solid #eef0f3; font-size:14px; color:#374151;">
-                    {{ $compra->lote->nombre }}
+                    {{ $compra->lote->nombre ?? $compra->manual->titulo }}
                 </td>
                 <td style="padding:12px 16px; border-bottom:1px solid #eef0f3; font-size:14px; color:#374151; text-align:right; white-space:nowrap;">
                     S/ {{ number_format((float) $compra->monto, 2) }}

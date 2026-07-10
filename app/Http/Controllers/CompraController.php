@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Mail\CompraConfirmada;
 use App\Models\Compra;
 use App\Models\Lote;
+use App\Models\Manual;
 use App\Services\CulqiService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -21,7 +22,7 @@ class CompraController extends Controller
      */
     public function index(Request $request)
     {
-        $compras = Compra::with('lote')
+        $compras = Compra::with(['lote', 'manual'])
             ->where('usuario_id', $request->user()->id)
             ->latest()
             ->get();
@@ -31,7 +32,7 @@ class CompraController extends Controller
 
     public function show(Request $request, string $id)
     {
-        $compra = Compra::with('lote')->findOrFail($id);
+        $compra = Compra::with(['lote', 'manual'])->findOrFail($id);
 
         if ($compra->usuario_id !== $request->user()->id) {
             abort(403);
@@ -41,47 +42,77 @@ class CompraController extends Controller
     }
 
     /**
-     * Procesa el checkout del carrito: uno o varios lotes en un solo cobro de Culqi.
+     * Procesa el checkout del carrito: lotes y/o manuales sueltos en un solo cobro de Culqi.
      */
     public function store(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'lote_ids' => ['required', 'array', 'min:1'],
+            'lote_ids' => ['nullable', 'array'],
             'lote_ids.*' => ['integer', 'exists:lotes,id'],
+            'manual_ids' => ['nullable', 'array'],
+            'manual_ids.*' => ['integer', 'exists:manuales,id'],
             'culqi_token' => ['required', 'string'],
         ]);
+
+        $validator->after(function ($validator) use ($request) {
+            if (empty($request->input('lote_ids')) && empty($request->input('manual_ids'))) {
+                $validator->errors()->add('lote_ids', 'El carrito está vacío.');
+            }
+        });
 
         if ($validator->fails()) {
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
         $usuario = $request->user();
-        $loteIds = array_unique($request->lote_ids);
+        $loteIds = array_unique($request->input('lote_ids', []));
+        $manualIds = array_unique($request->input('manual_ids', []));
 
-        $yaComprados = Compra::where('usuario_id', $usuario->id)
+        $lotesYaComprados = Compra::where('usuario_id', $usuario->id)
             ->whereIn('lote_id', $loteIds)
             ->where('estado', 'pagado')
-            ->pluck('lote_id');
+            ->exists();
 
-        if ($yaComprados->isNotEmpty()) {
-            return response()->json(['message' => 'Ya adquiriste uno o más de los lotes seleccionados.'], 409);
+        $manualesYaComprados = Compra::where('usuario_id', $usuario->id)
+            ->whereIn('manual_id', $manualIds)
+            ->where('estado', 'pagado')
+            ->exists();
+
+        if ($lotesYaComprados || $manualesYaComprados) {
+            return response()->json(['message' => 'Ya adquiriste uno o más de los productos seleccionados.'], 409);
         }
 
         $lotes = Lote::whereIn('id', $loteIds)->get();
-        $montoTotal = (float) $lotes->sum('precio');
+        $manuales = Manual::whereIn('id', $manualIds)->where('tipo', 'premium')->whereNull('lote_id')->get();
 
-        $compras = DB::transaction(function () use ($usuario, $lotes) {
-            return $lotes->map(fn ($lote) => Compra::create([
+        if ($manuales->count() !== count($manualIds)) {
+            return response()->json(['message' => 'Uno o más manuales seleccionados no están disponibles para venta individual.'], 422);
+        }
+
+        $montoTotal = (float) $lotes->sum('precio') + (float) $manuales->sum('precio');
+
+        $compras = DB::transaction(function () use ($usuario, $lotes, $manuales) {
+            $comprasLotes = $lotes->map(fn ($lote) => Compra::create([
                 'usuario_id' => $usuario->id,
                 'lote_id' => $lote->id,
                 'monto' => $lote->precio,
                 'estado' => 'pendiente',
             ]));
+
+            $comprasManuales = $manuales->map(fn ($manual) => Compra::create([
+                'usuario_id' => $usuario->id,
+                'manual_id' => $manual->id,
+                'monto' => $manual->precio,
+                'estado' => 'pendiente',
+            ]));
+
+            return $comprasLotes->concat($comprasManuales);
         });
 
-        $descripcion = $lotes->count() === 1
-            ? "Manual-Pets - Lote: {$lotes->first()->nombre}"
-            : "Manual-Pets - Carrito ({$lotes->count()} lotes)";
+        $totalItems = $lotes->count() + $manuales->count();
+        $descripcion = $totalItems === 1
+            ? 'Manual-Pets - '.($lotes->first()->nombre ?? $manuales->first()->titulo)
+            : "Manual-Pets - Carrito ({$totalItems} productos)";
 
         $resultado = $this->culqi->crearCargo($request->culqi_token, $montoTotal, $usuario->email, $descripcion);
 
@@ -95,7 +126,7 @@ class CompraController extends Controller
                 ]);
             }
 
-            $comprasConfirmadas = $compras->fresh('lote');
+            $comprasConfirmadas = $compras->fresh(['lote', 'manual']);
 
             try {
                 Mail::to($usuario->email)->send(new CompraConfirmada($usuario, $comprasConfirmadas));

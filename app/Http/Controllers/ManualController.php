@@ -17,15 +17,24 @@ class ManualController extends Controller
         $manuales = Manual::with('lote:id,nombre,precio')
             ->where('estado', 'activo')
             ->latest()
-            ->get(['id', 'lote_id', 'titulo', 'descripcion', 'tipo', 'portada_url', 'estado', 'created_at']);
+            ->get(['id', 'lote_id', 'titulo', 'descripcion', 'tipo', 'precio', 'portada_url', 'estado', 'created_at']);
 
         $usuario = $request->user('sanctum');
-        $comprados = $usuario
+        $lotesComprados = $usuario
             ? $usuario->compras()->where('estado', 'pagado')->pluck('lote_id')
             : collect();
+        $manualesComprados = $usuario
+            ? $usuario->compras()->where('estado', 'pagado')->pluck('manual_id')
+            : collect();
 
-        $manuales->each(function ($manual) use ($comprados) {
-            $manual->bloqueado = $manual->tipo === 'premium' && ! $comprados->contains($manual->lote_id);
+        $manuales->each(function ($manual) use ($lotesComprados, $manualesComprados) {
+            if ($manual->tipo !== 'premium') {
+                $manual->bloqueado = false;
+            } elseif ($manual->lote_id !== null) {
+                $manual->bloqueado = ! $lotesComprados->contains($manual->lote_id);
+            } else {
+                $manual->bloqueado = ! $manualesComprados->contains($manual->id);
+            }
         });
 
         return response()->json($manuales);
@@ -69,8 +78,15 @@ class ManualController extends Controller
             return true;
         }
 
+        if ($manual->lote_id !== null) {
+            return ! $usuario->compras()
+                ->where('lote_id', $manual->lote_id)
+                ->where('estado', 'pagado')
+                ->exists();
+        }
+
         return ! $usuario->compras()
-            ->where('lote_id', $manual->lote_id)
+            ->where('manual_id', $manual->id)
             ->where('estado', 'pagado')
             ->exists();
     }
@@ -81,17 +97,25 @@ class ManualController extends Controller
             'titulo' => ['required', 'string', 'max:255'],
             'descripcion' => ['nullable', 'string'],
             'tipo' => ['required', 'in:gratis,premium'],
-            'lote_id' => ['required_if:tipo,premium', 'nullable', 'integer', 'exists:lotes,id'],
+            'lote_id' => ['nullable', 'integer', 'exists:lotes,id'],
+            'precio' => ['nullable', 'numeric', 'min:0'],
             'archivo_pdf' => ['required', 'file', 'mimes:pdf', 'max:20480'],
             'portada' => ['nullable', 'image', 'max:4096'],
             'estado' => ['sometimes', 'in:activo,inactivo'],
         ]);
 
+        $loteId = $request->filled('lote_id') ? $request->input('lote_id') : null;
+        $precio = $request->filled('precio') ? $request->input('precio') : null;
+
+        $this->validarPrecioVsLote($validator, $request->input('tipo'), $loteId, $precio);
+
         if ($validator->fails()) {
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
-        $datos = $request->only(['titulo', 'descripcion', 'tipo', 'lote_id', 'estado']);
+        $datos = $request->only(['titulo', 'descripcion', 'tipo', 'estado']);
+        $datos['lote_id'] = $loteId;
+        $datos['precio'] = $datos['tipo'] === 'premium' && ! $loteId ? $precio : null;
         $datos['archivo_pdf'] = $request->file('archivo_pdf')->store('manuales', 'local');
 
         if ($request->hasFile('portada')) {
@@ -105,6 +129,20 @@ class ManualController extends Controller
         return response()->json($manual, 201);
     }
 
+    /**
+     * Un manual premium debe pertenecer a un lote O tener precio propio, no ambos ni ninguno.
+     * Se usa ->after() porque agregar el error directo al MessageBag antes de fails()
+     * se pierde: fails() vuelve a ejecutar la validación desde cero.
+     */
+    private function validarPrecioVsLote($validator, ?string $tipo, $loteId, $precio): void
+    {
+        $validator->after(function ($validator) use ($tipo, $loteId, $precio) {
+            if ($tipo === 'premium' && empty($loteId) && ! $precio) {
+                $validator->errors()->add('precio', 'Debes indicar un precio o vincular el manual a un lote.');
+            }
+        });
+    }
+
     public function update(Request $request, string $id)
     {
         $manual = Manual::findOrFail($id);
@@ -114,16 +152,26 @@ class ManualController extends Controller
             'descripcion' => ['nullable', 'string'],
             'tipo' => ['sometimes', 'in:gratis,premium'],
             'lote_id' => ['nullable', 'integer', 'exists:lotes,id'],
+            'precio' => ['nullable', 'numeric', 'min:0'],
             'archivo_pdf' => ['nullable', 'file', 'mimes:pdf', 'max:20480'],
             'portada' => ['nullable', 'image', 'max:4096'],
             'estado' => ['sometimes', 'in:activo,inactivo'],
         ]);
 
+        $tipo = $request->input('tipo', $manual->tipo);
+        $loteId = $request->filled('lote_id') ? $request->input('lote_id') : null;
+        $precio = $request->filled('precio') ? $request->input('precio') : null;
+
+        $this->validarPrecioVsLote($validator, $tipo, $loteId, $precio);
+
         if ($validator->fails()) {
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
-        $datos = $request->only(['titulo', 'descripcion', 'tipo', 'lote_id', 'estado']);
+        $datos = $request->only(['titulo', 'descripcion', 'estado']);
+        $datos['tipo'] = $tipo;
+        $datos['lote_id'] = $loteId;
+        $datos['precio'] = $tipo === 'premium' && ! $loteId ? $precio : null;
 
         if ($request->hasFile('archivo_pdf')) {
             Storage::disk('local')->delete($manual->archivo_pdf);

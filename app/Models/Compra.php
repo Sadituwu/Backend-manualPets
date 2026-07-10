@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-#[Fillable(['usuario_id', 'lote_id', 'monto', 'estado', 'culqi_charge_id', 'metodo_pago', 'fecha_pago'])]
+#[Fillable(['usuario_id', 'lote_id', 'manual_id', 'monto', 'estado', 'culqi_charge_id', 'metodo_pago', 'fecha_pago'])]
 class Compra extends Model
 {
     protected function casts(): array
@@ -31,6 +31,14 @@ class Compra extends Model
     public function lote(): BelongsTo
     {
         return $this->belongsTo(Lote::class);
+    }
+
+    /**
+     * @return BelongsTo<Manual, $this>
+     */
+    public function manual(): BelongsTo
+    {
+        return $this->belongsTo(Manual::class);
     }
 
     public function estaPagada(): bool
